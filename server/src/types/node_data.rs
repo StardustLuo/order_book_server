@@ -87,6 +87,11 @@ impl<E> Batch<E> {
         self.block_time.and_utc().timestamp_millis().try_into().unwrap()
     }
 
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn local_time(&self) -> u64 {
+        self.local_time.and_utc().timestamp_millis().try_into().unwrap()
+    }
+
     pub(crate) const fn block_number(&self) -> u64 {
         self.block_number
     }

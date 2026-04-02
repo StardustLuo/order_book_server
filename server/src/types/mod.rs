@@ -48,6 +48,7 @@ impl Level {
 pub(crate) struct L2Book {
     coin: String,
     time: u64,
+    server_time: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     n_sig_figs: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +69,7 @@ pub(crate) enum L4Book {
 pub(crate) struct Bbo {
     pub coin: String,
     pub time: u64,
+    pub server_time: u64,
     pub bid: Option<Level>,
     pub ask: Option<Level>,
 }
@@ -77,11 +79,12 @@ impl L2Book {
         coin: String,
         snapshot: [Vec<Level>; 2],
         time: u64,
+        server_time: u64,
         n_sig_figs: Option<u32>,
         mantissa: Option<u64>,
         n_levels: Option<usize>,
     ) -> Self {
-        Self { coin, time, n_sig_figs, mantissa, n_levels, levels: snapshot }
+        Self { coin, time, server_time, n_sig_figs, mantissa, n_levels, levels: snapshot }
     }
 }
 

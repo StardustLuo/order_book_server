@@ -186,20 +186,20 @@ async fn handle_socket(
                 match recv_result {
                     Ok(msg) => {
                         match msg.as_ref() {
-                            InternalMessage::Snapshot{ l2_snapshots, time } => {
+                            InternalMessage::Snapshot{ l2_snapshots, time, server_time } => {
                                 universe = new_universe(l2_snapshots, market_filter.0, market_filter.1, market_filter.2);
                                 for sub in manager.subscriptions() {
                                     // Skip BBO subs here - they get fast updates via BboUpdate
                                     if !matches!(sub, Subscription::Bbo { .. }) {
-                                        send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_bbo, &mut last_l2_hash).await;
+                                        send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, *server_time, &mut last_bbo, &mut last_l2_hash).await;
                                     }
                                 }
                             },
-                            InternalMessage::BboUpdate{ bbos, time } => {
+                            InternalMessage::BboUpdate{ bbos, time, server_time } => {
                                 // Fast path for BBO subscribers only
                                 for sub in manager.subscriptions() {
                                     if let Subscription::Bbo { coin } = sub {
-                                        send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo).await;
+                                        send_ws_data_from_bbo(&mut socket, coin, bbos, *time, *server_time, &mut last_bbo).await;
                                     }
                                 }
                             },
@@ -371,6 +371,7 @@ async fn send_ws_data_from_bbo(
     coin: &str,
     bbos: &HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
     time: u64,
+    server_time: u64,
     last_bbo: &mut HashMap<String, (String, String, String, String)>,
 ) {
     let coin_key = Coin::new(coin);
@@ -394,7 +395,7 @@ async fn send_ws_data_from_bbo(
             last_bbo.insert(coin.to_string(), current);
             BBO_CHANGES_TOTAL.with_label_values(&[coin]).inc();
             BROADCASTS_TOTAL.with_label_values(&["bbo"]).inc();
-            let bbo = Bbo { coin: coin.to_string(), time, bid, ask };
+            let bbo = Bbo { coin: coin.to_string(), time, server_time, bid, ask };
             let msg = ServerResponse::Bbo(bbo);
             send_socket_message(socket, msg).await;
         }
@@ -442,6 +443,7 @@ async fn send_ws_data_from_snapshot(
     subscription: &Subscription,
     snapshot: &HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>,
     time: u64,
+    server_time: u64,
     last_bbo: &mut HashMap<String, (String, String, String, String)>,
     last_l2_hash: &mut HashMap<String, u64>,
 ) {
@@ -470,7 +472,7 @@ async fn send_ws_data_from_snapshot(
                     last_l2_hash.insert(key, current_hash);
                     BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
                     let l2_book =
-                        L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels));
+                        L2Book::from_l2_snapshot(coin.clone(), snapshot, time, server_time, *n_sig_figs, *mantissa, Some(n_levels));
                     let msg = ServerResponse::L2Book(l2_book);
                     send_socket_message(socket, msg).await;
                 }
@@ -496,7 +498,7 @@ async fn send_ws_data_from_snapshot(
 
                 if last_bbo.get(coin) != Some(&current) {
                     last_bbo.insert(coin.clone(), current);
-                    let bbo = Bbo { coin: coin.clone(), time, bid, ask };
+                    let bbo = Bbo { coin: coin.clone(), time, server_time, bid, ask };
                     let msg = ServerResponse::Bbo(bbo);
                     send_socket_message(socket, msg).await;
                 }

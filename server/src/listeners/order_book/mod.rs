@@ -162,15 +162,17 @@ impl OrderBookListener {
         let res = match event_source {
             EventSource::Fills => sonic_rs::from_str::<Batch<NodeDataFill>>(&line).map(|batch| {
                 let height = batch.block_number();
-                (height, EventBatch::Fills(batch))
+                let block_time = batch.block_time();
+                let local_time = batch.local_time();
+                (height, block_time, local_time, EventBatch::Fills(batch))
             }),
             EventSource::OrderStatuses => sonic_rs::from_str(&line)
-                .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
+                .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), batch.block_time(), batch.local_time(), EventBatch::Orders(batch))),
             EventSource::OrderDiffs => sonic_rs::from_str(&line)
-                .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), EventBatch::BookDiffs(batch))),
+                .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), batch.block_time(), batch.local_time(), EventBatch::BookDiffs(batch))),
         };
 
-        let (height, event_batch) = match res {
+        let (height, block_time_ms, local_time_ms, event_batch) = match res {
             Ok(data) => data,
             Err(err) => {
                 // Log ALL parse errors for debugging
@@ -204,7 +206,17 @@ impl OrderBookListener {
         let process_start = Instant::now();
 
         if ok_count % 10_000 == 0 {
-            info!("parse OK #{}: height={}, source={}", ok_count, height, event_source);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let gossip_latency = local_time_ms.saturating_sub(block_time_ms);
+            let file_to_read = now_ms.saturating_sub(local_time_ms);
+            let total = now_ms.saturating_sub(block_time_ms);
+            info!(
+                "parse OK #{}: height={}, source={}, gossip={}ms, file→read={}ms, total={}ms",
+                ok_count, height, event_source, gossip_latency, file_to_read, total
+            );
         }
 
         if height % 100 == 0 {
@@ -306,7 +318,7 @@ impl OrderBookListener {
         if !changed_coins.is_empty() {
             if let Some(state) = &self.order_book_state {
                 let bbo_start = Instant::now();
-                let (time, bbos) = state.get_bbos_for_coins(&changed_coins);
+                let (time, server_time, bbos) = state.get_bbos_for_coins(&changed_coins);
                 if let Some(tx) = &self.internal_message_tx {
                     // Count fast BBO broadcasts
                     static BBO_BROADCAST_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -317,7 +329,7 @@ impl OrderBookListener {
 
                     let tx = tx.clone();
                     tokio::spawn(async move {
-                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time });
+                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time, server_time });
                         drop(tx.send(msg));
                     });
                 }
@@ -333,7 +345,7 @@ impl OrderBookListener {
         if should_broadcast_l2 {
             if let Some(state) = &self.order_book_state {
                 let l2_start = Instant::now();
-                let (time, l2_snapshots) = state.l2_snapshots_uncached();
+                let (time, server_time, l2_snapshots) = state.l2_snapshots_uncached();
                 if let Some(tx) = &self.internal_message_tx {
                     self.last_l2_broadcast = Some(Instant::now());
 
@@ -346,7 +358,7 @@ impl OrderBookListener {
 
                     let tx = tx.clone();
                     tokio::spawn(async move {
-                        let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
+                        let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time, server_time });
                         drop(tx.send(msg));
                     });
                 }
@@ -376,6 +388,7 @@ pub(crate) enum InternalMessage {
     Snapshot {
         l2_snapshots: L2Snapshots,
         time: u64,
+        server_time: u64,
     },
     Fills {
         batch: Batch<NodeDataFill>,
@@ -384,6 +397,7 @@ pub(crate) enum InternalMessage {
     BboUpdate {
         bbos: HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
         time: u64,
+        server_time: u64,
     },
     /// HFT L4 streaming - order diffs without waiting for status pairing
     L4OrderDiffs {

@@ -11,12 +11,18 @@ use crate::{
     },
 };
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
 
 #[derive(Clone)]
 pub(super) struct OrderBookState {
     order_book: OrderBooks<InnerL4Order>,
     height: u64,
     time: u64,
+    server_time: u64,
     ignore_spot: bool,
     // Persistent cache of OrderStatuses waiting for their New diffs
     // Allows OrderStatus and OrderDiff to arrive in any order (HFT-compatible)
@@ -37,6 +43,7 @@ impl OrderBookState {
         Self {
             ignore_spot,
             time,
+            server_time: now_ms(),
             height,
             order_book: OrderBooks::from_snapshots(snapshot, ignore_triggers),
             pending_order_statuses: HashMap::new(),
@@ -59,8 +66,8 @@ impl OrderBookState {
 
     // Always returns fresh L2 snapshots (no caching/flag check)
     // Used for real-time streaming updates to L2/BBO subscribers
-    pub(super) fn l2_snapshots_uncached(&self) -> (u64, L2Snapshots) {
-        (self.time, compute_l2_snapshots(&self.order_book))
+    pub(super) fn l2_snapshots_uncached(&self) -> (u64, u64, L2Snapshots) {
+        (self.time, self.server_time, compute_l2_snapshots(&self.order_book))
     }
 
     pub(super) fn compute_universe(&self) -> HashSet<Coin> {
@@ -118,6 +125,7 @@ impl OrderBookState {
         coins: &HashSet<Coin>,
     ) -> (
         u64,
+        u64,
         HashMap<
             Coin,
             (
@@ -127,7 +135,7 @@ impl OrderBookState {
         >,
     ) {
         let bbos = self.order_book.get_bbos_for_coins(coins);
-        (self.time, bbos)
+        (self.time, self.server_time, bbos)
     }
 
     /// HFT-specific: Process OrderStatuses independently without block synchronization
@@ -142,6 +150,7 @@ impl OrderBookState {
         if height >= self.height {
             self.height = height;
             self.time = time;
+            self.server_time = now_ms();
         }
 
         for order_status in batch.events() {
