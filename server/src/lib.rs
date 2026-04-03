@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 
 pub use prelude::Result;
+pub use servers::evm_ws_server::run_evm_ws_server;
 pub use servers::websocket_server::run_websocket_server;
 
 /// Snapshot fetching mode
@@ -55,4 +56,15 @@ pub struct ServerConfig {
     /// BBO-only mode: lightweight mode that only tracks best bid/ask per coin
     /// Disables L2/L4/Trades subscriptions but uses ~100MB RAM instead of 2-3GB
     pub bbo_only: bool,
+}
+
+/// EVM WebSocket server configuration
+#[derive(Debug, Clone)]
+pub struct EvmServerConfig {
+    /// Full address string (e.g., "0.0.0.0:8545")
+    pub address: String,
+    /// WebSocket compression level (0-9)
+    pub compression_level: u32,
+    /// Path to evm_block_and_receipts directory
+    pub evm_data_dir: PathBuf,
 }

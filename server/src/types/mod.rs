@@ -6,6 +6,7 @@ use crate::{
     types::node_data::{NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 
+pub(crate) mod evm;
 pub(crate) mod inner;
 pub(crate) mod node_data;
 pub(crate) mod subscription;
