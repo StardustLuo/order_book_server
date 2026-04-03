@@ -1,0 +1,32 @@
+services:
+  orderbook-server:
+    image: localhost/order-book-server:latest
+    container_name: orderbook-server
+    command:
+      - /app/orderbook_server
+      - --snapshot-mode=direct
+      - --hlnode-binary=/root/hl-node
+      - --data-dir=/root/hl/data
+      - --abci-state-path=/root/hl/hyperliquid_data/abci_state.rmp
+      - --address=127.0.0.1
+      - --port=8000
+      - --metrics-port=9090
+    volumes:
+      - /data/hl-root:/root
+      - /home/ubuntu/order_book_server/target/release:/app:ro
+    network_mode: host
+    restart: unless-stopped
+
+  evm-ws-server:
+    image: localhost/order-book-server:latest
+    container_name: evm-ws-server
+    command:
+      - /app/evm_ws_server
+      - --evm-data-dir=/root/hl/data/evm_block_and_receipts
+      - --address=127.0.0.1
+      - --port=8001
+    volumes:
+      - /data/hl-root:/root:ro
+      - /home/ubuntu/order_book_server/target/release:/app:ro
+    network_mode: host
+    restart: unless-stopped
