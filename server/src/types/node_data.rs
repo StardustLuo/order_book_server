@@ -87,6 +87,11 @@ impl<E> Batch<E> {
         self.block_time.and_utc().timestamp_millis().try_into().unwrap()
     }
 
+    /// hl-node local time when it wrote this batch (microseconds since epoch)
+    pub(crate) fn local_time_us(&self) -> u64 {
+        self.local_time.and_utc().timestamp_micros() as u64
+    }
+
     pub(crate) const fn block_number(&self) -> u64 {
         self.block_number
     }

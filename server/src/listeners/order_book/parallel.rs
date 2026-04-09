@@ -17,12 +17,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Microseconds since Unix epoch
+pub(crate) fn now_us() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_micros() as u64
+}
+
 /// Message sent from file watcher threads to the main processor
 #[derive(Debug)]
 pub(crate) enum FileEvent {
-    OrderStatus(String),
-    OrderDiff(String),
-    Fill(String),
+    OrderStatus(String, u64), // (line, inotify_time_us)
+    OrderDiff(String, u64),
+    Fill(String, u64),
 }
 
 /// File reader state for a single source
@@ -288,9 +293,9 @@ pub(super) fn spawn_file_watcher(
                             let old_lines = reader.on_create(path);
                             for line in old_lines {
                                 let evt = match source {
-                                    EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                                    EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                                    EventSource::Fills => FileEvent::Fill(line),
+                                    EventSource::OrderStatuses => FileEvent::OrderStatus(line, now_us()),
+                                    EventSource::OrderDiffs => FileEvent::OrderDiff(line, now_us()),
+                                    EventSource::Fills => FileEvent::Fill(line, now_us()),
                                 };
                                 if tx.send(evt).is_err() {
                                     error!("{} channel closed, exiting", source_name);
@@ -307,9 +312,9 @@ pub(super) fn spawn_file_watcher(
                         let lines = reader.on_modify();
                         for line in lines {
                             let event = match source {
-                                EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                                EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                                EventSource::Fills => FileEvent::Fill(line),
+                                EventSource::OrderStatuses => FileEvent::OrderStatus(line, now_us()),
+                                EventSource::OrderDiffs => FileEvent::OrderDiff(line, now_us()),
+                                EventSource::Fills => FileEvent::Fill(line, now_us()),
                             };
 
                             if tx.send(event).is_err() {
@@ -331,9 +336,9 @@ pub(super) fn spawn_file_watcher(
                     let lines = reader.on_modify();
                     for line in lines {
                         let event = match source {
-                            EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                            EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                            EventSource::Fills => FileEvent::Fill(line),
+                            EventSource::OrderStatuses => FileEvent::OrderStatus(line, now_us()),
+                            EventSource::OrderDiffs => FileEvent::OrderDiff(line, now_us()),
+                            EventSource::Fills => FileEvent::Fill(line, now_us()),
                         };
 
                         if tx.send(event).is_err() {
@@ -375,9 +380,9 @@ pub(super) fn spawn_file_watcher(
                     let old_lines = reader.on_create(&newer_file);
                     for line in old_lines {
                         let evt = match source {
-                            EventSource::OrderStatuses => FileEvent::OrderStatus(line),
-                            EventSource::OrderDiffs => FileEvent::OrderDiff(line),
-                            EventSource::Fills => FileEvent::Fill(line),
+                            EventSource::OrderStatuses => FileEvent::OrderStatus(line, now_us()),
+                            EventSource::OrderDiffs => FileEvent::OrderDiff(line, now_us()),
+                            EventSource::Fills => FileEvent::Fill(line, now_us()),
                         };
                         if tx.send(evt).is_err() {
                             error!("{} channel closed, exiting", source_name);

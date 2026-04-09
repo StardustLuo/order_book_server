@@ -186,20 +186,20 @@ async fn handle_socket(
                 match recv_result {
                     Ok(msg) => {
                         match msg.as_ref() {
-                            InternalMessage::Snapshot{ l2_snapshots, time } => {
+                            InternalMessage::Snapshot{ l2_snapshots, time, local_time_us, inotify_time_us, broadcast_time_us } => {
                                 universe = new_universe(l2_snapshots, market_filter.0, market_filter.1, market_filter.2);
                                 for sub in manager.subscriptions() {
                                     // Skip BBO subs here - they get fast updates via BboUpdate
                                     if !matches!(sub, Subscription::Bbo { .. }) {
-                                        send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_bbo, &mut last_l2_hash).await;
+                                        send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time, &mut last_bbo, &mut last_l2_hash, *local_time_us, *inotify_time_us, *broadcast_time_us).await;
                                     }
                                 }
                             },
-                            InternalMessage::BboUpdate{ bbos, time } => {
+                            InternalMessage::BboUpdate{ bbos, time, local_time_us, inotify_time_us, broadcast_time_us } => {
                                 // Fast path for BBO subscribers only
                                 for sub in manager.subscriptions() {
                                     if let Subscription::Bbo { coin } = sub {
-                                        send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo).await;
+                                        send_ws_data_from_bbo(&mut socket, coin, bbos, *time, &mut last_bbo, *local_time_us, *inotify_time_us, *broadcast_time_us).await;
                                     }
                                 }
                             },
@@ -372,6 +372,9 @@ async fn send_ws_data_from_bbo(
     bbos: &HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
     time: u64,
     last_bbo: &mut HashMap<String, (String, String, String, String)>,
+    local_time_us: u64,
+    inotify_time_us: u64,
+    broadcast_time_us: u64,
 ) {
     let coin_key = Coin::new(coin);
     if let Some((best_bid, best_ask)) = bbos.get(&coin_key) {
@@ -394,7 +397,8 @@ async fn send_ws_data_from_bbo(
             last_bbo.insert(coin.to_string(), current);
             BBO_CHANGES_TOTAL.with_label_values(&[coin]).inc();
             BROADCASTS_TOTAL.with_label_values(&["bbo"]).inc();
-            let bbo = Bbo { coin: coin.to_string(), time, bid, ask };
+            let ws_send_time_us = crate::listeners::order_book::parallel::now_us();
+            let bbo = Bbo { coin: coin.to_string(), time, bid, ask, local_time_us, inotify_time_us, broadcast_time_us, ws_send_time_us };
             let msg = ServerResponse::Bbo(bbo);
             send_socket_message(socket, msg).await;
         }
@@ -444,6 +448,9 @@ async fn send_ws_data_from_snapshot(
     time: u64,
     last_bbo: &mut HashMap<String, (String, String, String, String)>,
     last_l2_hash: &mut HashMap<String, u64>,
+    local_time_us: u64,
+    inotify_time_us: u64,
+    broadcast_time_us: u64,
 ) {
     match subscription {
         Subscription::L2Book { coin, n_sig_figs, n_levels, mantissa } => {
@@ -469,8 +476,9 @@ async fn send_ws_data_from_snapshot(
                 if last_l2_hash.get(&key) != Some(&current_hash) {
                     last_l2_hash.insert(key, current_hash);
                     BROADCASTS_TOTAL.with_label_values(&["l2"]).inc();
+                    let ws_send_time_us = crate::listeners::order_book::parallel::now_us();
                     let l2_book =
-                        L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels));
+                        L2Book::from_l2_snapshot(coin.clone(), snapshot, time, *n_sig_figs, *mantissa, Some(n_levels), local_time_us, inotify_time_us, broadcast_time_us, ws_send_time_us);
                     let msg = ServerResponse::L2Book(l2_book);
                     send_socket_message(socket, msg).await;
                 }
@@ -496,7 +504,7 @@ async fn send_ws_data_from_snapshot(
 
                 if last_bbo.get(coin) != Some(&current) {
                     last_bbo.insert(coin.clone(), current);
-                    let bbo = Bbo { coin: coin.clone(), time, bid, ask };
+                    let bbo = Bbo { coin: coin.clone(), time, bid, ask, local_time_us: 0, inotify_time_us: 0, broadcast_time_us: 0, ws_send_time_us: 0 };
                     let msg = ServerResponse::Bbo(bbo);
                     send_socket_message(socket, msg).await;
                 }

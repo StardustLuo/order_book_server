@@ -35,6 +35,7 @@ struct Record {
     off_lat: u64,
     lo_recv: u64,
     off_recv: u64,
+    consensus_us: u64,
 }
 
 fn spawn_ws(
@@ -45,27 +46,38 @@ fn spawn_ws(
     label: &'static str,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let (mut ws, _) =
-            tungstenite::connect(&url).unwrap_or_else(|e| panic!("[{label}] connect failed: {e}"));
-        let sub = format!(
-            r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#
-        );
-        ws.send(tungstenite::Message::Text(sub.into())).unwrap();
-        drop(ws.read()); // ack
-
         loop {
-            let msg = match ws.read() {
-                Ok(tungstenite::Message::Text(t)) => t.to_string(),
-                Ok(_) => continue,
+            let (mut ws, _) = match tungstenite::connect(&url) {
+                Ok(conn) => conn,
                 Err(e) => {
-                    eprintln!("[{label}] WS error: {e}");
-                    break;
+                    eprintln!("[{label}] connect failed: {e}, retrying in 3s...");
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    continue;
                 }
             };
-            let recv_us = now_us();
-            // Hand off immediately — no parsing here
-            if tx.send(wrap(msg, recv_us)).is_err() {
-                break;
+            let sub = format!(
+                r#"{{"method":"subscribe","subscription":{{"type":"l2Book","coin":"{coin}"}}}}"#
+            );
+            if ws.send(tungstenite::Message::Text(sub.into())).is_err() {
+                eprintln!("[{label}] subscribe failed, retrying in 3s...");
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                continue;
+            }
+            drop(ws.read()); // ack
+
+            loop {
+                let msg = match ws.read() {
+                    Ok(tungstenite::Message::Text(t)) => t.to_string(),
+                    Ok(_) => continue,
+                    Err(e) => {
+                        eprintln!("[{label}] WS error: {e}, reconnecting...");
+                        break; // break inner loop → reconnect
+                    }
+                };
+                let recv_us = now_us();
+                if tx.send(wrap(msg, recv_us)).is_err() {
+                    return; // channel closed, exit thread
+                }
             }
         }
     })
@@ -77,21 +89,24 @@ fn spawn_writer(rx: mpsc::Receiver<Record>, output_file: String) -> std::thread:
         for r in rx {
             let _ = writeln!(
                 writer,
-                r#"{{"block_time_ms":{},"local_recv_us":{},"official_recv_us":{},"local_e2e_us":{},"official_e2e_us":{}}}"#,
-                r.bt, r.lo_recv, r.off_recv, r.lo_lat, r.off_lat
+                r#"{{"block_time_ms":{},"local_recv_us":{},"official_recv_us":{},"local_e2e_us":{},"official_e2e_us":{},"consensus_us":{}}}"#,
+                r.bt, r.lo_recv, r.off_recv, r.lo_lat, r.off_lat, r.consensus_us
             );
             let _ = writer.flush();
         }
     })
 }
 
-fn parse_block_time(raw: &str) -> Option<u64> {
+/// Returns (block_time_ms, local_time_us) from an l2Book message
+fn parse_l2_msg(raw: &str) -> Option<(u64, u64)> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     if v.get("channel")?.as_str()? != "l2Book" {
         return None;
     }
     let t = v["data"]["time"].as_u64()?;
-    if t == 0 { None } else { Some(t) }
+    if t == 0 { return None; }
+    let local_time_us = v["data"]["localTimeUs"].as_u64().unwrap_or(0);
+    Some((t, local_time_us))
 }
 
 fn main() {
@@ -119,16 +134,16 @@ fn main() {
     let _h2 = spawn_ws(raw_tx, official_url, coin, RawMsg::Official, "official");
     let _hw = spawn_writer(write_rx, output_file);
 
-    let mut local_map: HashMap<u64, u64> = HashMap::new();
+    let mut local_map: HashMap<u64, (u64, u64)> = HashMap::new(); // bt -> (recv_us, local_time_us)
     let mut official_map: HashMap<u64, u64> = HashMap::new();
     let mut matched_set: HashSet<u64> = HashSet::new();
     let mut matched_count = 0usize;
 
     println!(
-        "{:>5}  {:>15}  {:>12}  {:>12}  {:>12}  {:>8}",
-        "#", "block_time_ms", "local_us", "official_us", "diff_us", "faster"
+        "{:>5}  {:>15}  {:>12}  {:>12}  {:>12}  {:>12}  {:>8}",
+        "#", "block_time_ms", "local_us", "official_us", "consensus_us", "diff_us", "faster"
     );
-    println!("{}", "-".repeat(80));
+    println!("{}", "-".repeat(95));
 
     while matched_count < count {
         let raw = match raw_rx.recv() {
@@ -137,13 +152,13 @@ fn main() {
         };
 
         // Parse on main thread (off the hot WS path)
-        let (block_time_ms, recv_us, is_local) = match &raw {
-            RawMsg::Local(text, recv) => match parse_block_time(text) {
-                Some(bt) => (bt, *recv, true),
+        let (block_time_ms, recv_us, local_time_us, is_local) = match &raw {
+            RawMsg::Local(text, recv) => match parse_l2_msg(text) {
+                Some((bt, lt)) => (bt, *recv, lt, true),
                 None => continue,
             },
-            RawMsg::Official(text, recv) => match parse_block_time(text) {
-                Some(bt) => (bt, *recv, false),
+            RawMsg::Official(text, recv) => match parse_l2_msg(text) {
+                Some((bt, _)) => (bt, *recv, 0u64, false),
                 None => continue,
             },
         };
@@ -153,23 +168,23 @@ fn main() {
         }
 
         if is_local {
-            local_map.entry(block_time_ms).or_insert(recv_us);
+            local_map.entry(block_time_ms).or_insert((recv_us, local_time_us));
             if let Some(&off_recv) = official_map.get(&block_time_ms) {
-                let lo_recv = *local_map.get(&block_time_ms).unwrap();
+                let (lo_recv, lo_lt) = *local_map.get(&block_time_ms).unwrap();
                 matched_set.insert(block_time_ms);
                 print_and_send(
                     &write_tx, &mut matched_count,
-                    block_time_ms, lo_recv, off_recv,
+                    block_time_ms, lo_recv, off_recv, lo_lt,
                 );
             }
         } else {
             official_map.entry(block_time_ms).or_insert(recv_us);
-            if let Some(&lo_recv) = local_map.get(&block_time_ms) {
+            if let Some(&(lo_recv, lo_lt)) = local_map.get(&block_time_ms) {
                 let off_recv = *official_map.get(&block_time_ms).unwrap();
                 matched_set.insert(block_time_ms);
                 print_and_send(
                     &write_tx, &mut matched_count,
-                    block_time_ms, lo_recv, off_recv,
+                    block_time_ms, lo_recv, off_recv, lo_lt,
                 );
             }
         }
@@ -188,19 +203,20 @@ fn main() {
 fn print_and_send(
     write_tx: &mpsc::SyncSender<Record>,
     matched_count: &mut usize,
-    bt: u64, lo: u64, off: u64,
+    bt: u64, lo: u64, off: u64, local_time_us: u64,
 ) {
     *matched_count += 1;
     let bt_us = bt * 1000;
     let lo_lat = lo.saturating_sub(bt_us);
     let off_lat = off.saturating_sub(bt_us);
+    let consensus_us = if local_time_us > 0 { local_time_us.saturating_sub(bt_us) } else { 0 };
     let diff = lo as i64 - off as i64;
     let faster = if diff < 0 { "LOCAL" } else { "OFFICIAL" };
 
     println!(
-        "{:>5}  {:>15}  {:>10} us  {:>10} us  {:>+10} us  {:>8}",
-        matched_count, bt, lo_lat, off_lat, diff, faster
+        "{:>5}  {:>15}  {:>10} us  {:>10} us  {:>10} us  {:>+10} us  {:>8}",
+        matched_count, bt, lo_lat, off_lat, consensus_us, diff, faster
     );
 
-    let _ = write_tx.send(Record { bt, lo_lat, off_lat, lo_recv: lo, off_recv: off });
+    let _ = write_tx.send(Record { bt, lo_lat, off_lat, lo_recv: lo, off_recv: off, consensus_us });
 }

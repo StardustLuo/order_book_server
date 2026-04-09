@@ -33,7 +33,7 @@ use tokio::{
 };
 use utils::{EventBatch, SnapshotConfig, get_visor_path, process_rmp_file};
 
-mod parallel;
+pub(crate) mod parallel;
 mod state;
 mod utils;
 
@@ -146,7 +146,7 @@ impl OrderBookListener {
 
 impl OrderBookListener {
     /// HFT version of process_data - doesn't skip first line errors since we're processing complete JSON lines
-    pub(crate) fn process_data_hft(&mut self, line: String, event_source: EventSource) -> Result<()> {
+    pub(crate) fn process_data_hft(&mut self, line: String, event_source: EventSource, inotify_time_us: u64) -> Result<()> {
         // Count events for debugging
         static HFT_EVENT_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let count = HFT_EVENT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -162,15 +162,16 @@ impl OrderBookListener {
         let res = match event_source {
             EventSource::Fills => sonic_rs::from_str::<Batch<NodeDataFill>>(&line).map(|batch| {
                 let height = batch.block_number();
-                (height, EventBatch::Fills(batch))
+                let local_us = batch.local_time_us();
+                (height, local_us, EventBatch::Fills(batch))
             }),
             EventSource::OrderStatuses => sonic_rs::from_str(&line)
-                .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
+                .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), batch.local_time_us(), EventBatch::Orders(batch))),
             EventSource::OrderDiffs => sonic_rs::from_str(&line)
-                .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), EventBatch::BookDiffs(batch))),
+                .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), batch.local_time_us(), EventBatch::BookDiffs(batch))),
         };
 
-        let (height, event_batch) = match res {
+        let (height, local_time_us, event_batch) = match res {
             Ok(data) => data,
             Err(err) => {
                 // Log ALL parse errors for debugging
@@ -316,8 +317,9 @@ impl OrderBookListener {
                     }
 
                     let tx = tx.clone();
+                    let broadcast_time_us = parallel::now_us();
                     tokio::spawn(async move {
-                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time });
+                        let msg = Arc::new(InternalMessage::BboUpdate { bbos, time, local_time_us, inotify_time_us, broadcast_time_us });
                         drop(tx.send(msg));
                     });
                 }
@@ -345,8 +347,9 @@ impl OrderBookListener {
                     }
 
                     let tx = tx.clone();
+                    let broadcast_time_us = parallel::now_us();
                     tokio::spawn(async move {
-                        let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time });
+                        let msg = Arc::new(InternalMessage::Snapshot { l2_snapshots, time, local_time_us, inotify_time_us, broadcast_time_us });
                         drop(tx.send(msg));
                     });
                 }
@@ -376,6 +379,9 @@ pub(crate) enum InternalMessage {
     Snapshot {
         l2_snapshots: L2Snapshots,
         time: u64,
+        local_time_us: u64,
+        inotify_time_us: u64,
+        broadcast_time_us: u64,
     },
     Fills {
         batch: Batch<NodeDataFill>,
@@ -384,6 +390,9 @@ pub(crate) enum InternalMessage {
     BboUpdate {
         bbos: HashMap<Coin, (Option<(Px, Sz, u32)>, Option<(Px, Sz, u32)>)>,
         time: u64,
+        local_time_us: u64,
+        inotify_time_us: u64,
+        broadcast_time_us: u64,
     },
     /// HFT L4 streaming - order diffs without waiting for status pairing
     L4OrderDiffs {
@@ -479,21 +488,21 @@ pub(crate) async fn hl_listen_hft(listener: Arc<Mutex<OrderBookListener>>, confi
             // Process events from file watchers (via bridge)
             Some(event) = tokio_rx.recv() => {
                 match event {
-                    parallel::FileEvent::OrderDiff(line) => {
+                    parallel::FileEvent::OrderDiff(line, inotify_us) => {
                         // Process OrderDiff immediately - this is the BBO-critical path
-                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::OrderDiffs) {
+                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::OrderDiffs, inotify_us) {
                             error!("OrderDiff error: {err}");
                         }
                     }
-                    parallel::FileEvent::OrderStatus(line) => {
+                    parallel::FileEvent::OrderStatus(line, inotify_us) => {
                         // OrderStatuses are less latency-critical
-                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::OrderStatuses) {
+                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::OrderStatuses, inotify_us) {
                             error!("OrderStatus error: {err}");
                         }
                     }
-                    parallel::FileEvent::Fill(line) => {
+                    parallel::FileEvent::Fill(line, inotify_us) => {
                         // Fills are for trade data, not BBO
-                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::Fills) {
+                        if let Err(err) = listener.lock().await.process_data_hft(line, EventSource::Fills, inotify_us) {
                             error!("Fill error: {err}");
                         }
                     }

@@ -56,6 +56,15 @@ pub(crate) struct L2Book {
     #[serde(skip_serializing_if = "Option::is_none")]
     n_levels: Option<usize>,
     levels: [Vec<Level>; 2],
+    /// Latency instrumentation (microseconds since epoch, omitted if 0)
+    #[serde(skip_serializing_if = "is_zero")]
+    local_time_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    inotify_time_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    broadcast_time_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    ws_send_time_us: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,6 +80,19 @@ pub(crate) struct Bbo {
     pub time: u64,
     pub bid: Option<Level>,
     pub ask: Option<Level>,
+    /// Latency instrumentation (microseconds since epoch, omitted if 0)
+    #[serde(skip_serializing_if = "is_zero")]
+    pub local_time_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub inotify_time_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub broadcast_time_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub ws_send_time_us: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl L2Book {
@@ -81,8 +103,12 @@ impl L2Book {
         n_sig_figs: Option<u32>,
         mantissa: Option<u64>,
         n_levels: Option<usize>,
+        local_time_us: u64,
+        inotify_time_us: u64,
+        broadcast_time_us: u64,
+        ws_send_time_us: u64,
     ) -> Self {
-        Self { coin, time, n_sig_figs, mantissa, n_levels, levels: snapshot }
+        Self { coin, time, n_sig_figs, mantissa, n_levels, levels: snapshot, local_time_us, inotify_time_us, broadcast_time_us, ws_send_time_us }
     }
 }
 
